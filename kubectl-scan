@@ -1,0 +1,111 @@
+#!/bin/bash
+# Simple script to scan image vulnerabilities inside container of a kubernetes cluster
+# Rely on trivy to do the scan
+
+# Default behavior
+scan_init_containers=false
+scan_containers=true
+trivy_options=false
+trivy_image="bitnami/trivy:latest"
+pod_annotations="sidecar.istio.io/inject=false"
+
+# internal variables
+CONTAINERS_REQUEST=""
+INIT_CONTAINERS_REQUEST=""
+KUBECTL_OPTIONS=""
+TRIVY_OPTIONS=" --no-progress"
+
+usage()
+{
+  cat<<EOF >&2
+Usage: kubectl scan
+          [-i|--init-containers] [--trivy-image my/image]
+          [--pod-annotations annotations]
+          <KUBECTL_OPTIONS> -- <TRIVY_OPTIONS>
+
+With:
+  -i --init-containers  Scan init containers
+     --trivy-image      Trivy image reference (default=$trivy_image)
+     --pod-annotations   Add this annotations (default=$pod_annotations)
+
+You can use regular kubectl options to handle namespace or kubeconfig.
+To send options to trivy, put -- then set the needed parameters (default options: $TRIVY_OPTIONS).
+EOF
+}
+
+get_pod_summary()
+{
+  CONTAINERS_REQUEST="{{ .metadata.name }} images: {{ range .spec.containers }}{{ print '[' .image ']' }}
+{{ end }}"
+  KUBECTL_REQUEST="{{ range .items }}${INIT_CONTAINERS_REQUEST}${CONTAINERS_REQUEST}{{ end }}"
+  kubectl get pods -o go-template="${KUBECTL_REQUEST}" ${KUBECTL_OPTIONS} | sort -u
+}
+
+get_images()
+{
+  if $scan_containers; then
+    CONTAINERS_REQUEST="{{ range .spec.containers }}{{ .image }}
+{{ end }}"
+  fi
+  if $scan_init_containers; then
+    INIT_CONTAINERS_REQUEST="{{ range .spec.initContainers }}{{ .image }}
+{{ end }}"
+  fi
+  KUBECTL_REQUEST="{{ range .items }}${INIT_CONTAINERS_REQUEST}${CONTAINERS_REQUEST}{{ end }}"
+  kubectl get pods -o go-template="${KUBECTL_REQUEST}" ${KUBECTL_OPTIONS} | sort -u
+}
+
+get_trivy_commands()
+{
+  echo "mkdir -p /tmp/.docker"
+  echo "echo $(extract_secrets) | base64 -d > /tmp/.docker/config.json"
+  for image in $(get_images)
+  do
+    echo "echo \'### ${image}\' ; echo ; trivy image${TRIVY_OPTIONS} $image ; echo"
+  done
+}
+
+get_pull_secrets()
+{
+  kubectl get pods -o go-template="{{ range .items }}{{ range .spec.imagePullSecrets }}{{ .name }}
+{{ end }}{{ end }}" ${KUBECTL_OPTIONS} | sort -u
+}
+
+extract_secrets()
+{
+  for secret in $(get_pull_secrets)
+  do
+    kubectl get secret "${secret}" -o go-template='{{ (index .data ".dockerconfigjson") }}' \
+      ${KUBECTL_OPTIONS}
+    echo
+  done
+}
+
+scan_images()
+{
+  kubectl run -ti --rm "kubectl-scan" --env HOME=/tmp --image="${trivy_image}" --wait --restart=Never \
+    --annotations= \
+    ${KUBECTL_OPTIONS} --command sh -- -c "$(get_trivy_commands | sed 's/$/ ; /g' | xargs echo) echo done"
+}
+
+while [ $# -gt 0 ]
+do
+  case "$1" in
+    -h|--help) usage && exit 1 ;;
+    -i|--init-containers) scan_init_containers=true ;;
+    --pod-annotations) pod_annotations=$2 ; shift ;;
+    --trivy-image) trivy_image=$2 ; shift ;;
+    --) trivy_options=true ;;
+    *) if ! $trivy_options; then KUBECTL_OPTIONS="$KUBECTL_OPTIONS $1" ; else TRIVY_OPTIONS="${TRIVY_OPTIONS} $1" ; fi ;;
+  esac
+  shift
+done
+
+echo "# Scanning images" ; echo
+echo "kubectl options:$KUBECTL_OPTIONS" ; echo
+
+echo "## Pod informations" ; echo
+get_pod_summary ; echo
+
+echo "## Image scan" ; echo
+scan_images

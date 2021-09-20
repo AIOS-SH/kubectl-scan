@@ -35,10 +35,12 @@ EOF
 
 get_pod_summary()
 {
-  CONTAINERS_REQUEST="{{ .metadata.name }} images: {{ range .spec.containers }}{{ print '[' .image ']' }}
+  CONTAINERS_REQUEST='Pod {{ .metadata.name }}:{{ range .spec.containers }}
+  - {{ .name }}={{ .image }}{{ end }}
+'
+  KUBECTL_REQUEST="{{ range .items }}${CONTAINERS_REQUEST}
 {{ end }}"
-  KUBECTL_REQUEST="{{ range .items }}${INIT_CONTAINERS_REQUEST}${CONTAINERS_REQUEST}{{ end }}"
-  kubectl get pods -o go-template="${KUBECTL_REQUEST}" ${KUBECTL_OPTIONS} | sort -u
+  kubectl get pods -o go-template="${KUBECTL_REQUEST}" ${KUBECTL_OPTIONS}
 }
 
 get_images()
@@ -84,7 +86,7 @@ extract_secrets()
 scan_images()
 {
   kubectl run -ti --rm "kubectl-scan" --env HOME=/tmp --image="${trivy_image}" --wait --restart=Never \
-    --annotations= \
+    --annotations=$pod_annotations \
     ${KUBECTL_OPTIONS} --command sh -- -c "$(get_trivy_commands | sed 's/$/ ; /g' | xargs echo) echo done"
 }
 
